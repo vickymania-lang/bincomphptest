@@ -19,6 +19,10 @@ app.use(express.json());
 
 const STATE_ID = 25; // Delta State
 
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
 app.get("/api/lgas", async (req, res) => {
   try {
     const [rows] = await pool.query(
