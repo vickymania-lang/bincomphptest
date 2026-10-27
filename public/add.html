@@ -1,0 +1,201 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Add Polling Unit Results</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {
+        font-family: sans-serif;
+        max-width: 600px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      label {
+        display: block;
+        margin-top: 1rem;
+        font-weight: bold;
+      }
+      select,
+      input[type="text"],
+      input[type="number"] {
+        width: 100%;
+        padding: 0.5rem;
+        box-sizing: border-box;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.5rem 1rem;
+      }
+      button {
+        margin-top: 1.5rem;
+        padding: 0.7rem 1.5rem;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .msg {
+        margin-top: 1rem;
+        padding: 0.75rem;
+        border-radius: 4px;
+      }
+      .ok {
+        background: #e6f4ea;
+        color: #14532d;
+      }
+      .err {
+        background: #fdecea;
+        color: #7f1d1d;
+      }
+    </style>
+  </head>
+  <body>
+    <p><a href="/">Q1</a> | <a href="/lga.html">Q2</a></p>
+    <h1>Add Results for a New Polling Unit</h1>
+    <form id="f" novalidate>
+      <label>LGA</label>
+      <select id="lga" required>
+        <option value="">Loading...</option>
+      </select>
+      <label>Ward</label>
+      <select id="ward" disabled required>
+        <option value="">Select LGA first</option>
+      </select>
+      <label>Polling unit name</label>
+      <input
+        type="text"
+        id="name"
+        maxlength="50"
+        placeholder="e.g. Primary School, Main Street"
+        required
+      />
+      <label>Entered by</label>
+      <input
+        type="text"
+        id="by"
+        maxlength="50"
+        placeholder="Your name"
+        required
+      />
+      <label>Party scores</label>
+      <div class="grid" id="parties"></div>
+      <p>Total votes: <strong id="total">0</strong></p>
+      <button id="btn" type="submit">Save results</button>
+    </form>
+    <div id="msg"></div>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const getJSON = async (u) => (await fetch(u)).json();
+      let parties = [];
+
+      const fill = (sel, items, v, l, ph) => {
+        sel.innerHTML =
+          `<option value="">${ph}</option>` +
+          items.map((i) => `<option value="${i[v]}">${i[l]}</option>`).join("");
+        sel.disabled = false;
+      };
+      const show = (text, ok) => {
+        $("msg").innerHTML =
+          `<div class="msg ${ok ? "ok" : "err"}">${text}</div>`;
+      };
+      const updateTotal = () => {
+        $("total").textContent = [
+          ...document.querySelectorAll(".score"),
+        ].reduce((s, i) => s + (parseInt(i.value, 10) || 0), 0);
+      };
+
+      (async () => {
+        fill(
+          $("lga"),
+          await getJSON("/api/lgas"),
+          "lga_id",
+          "lga_name",
+          "Select LGA",
+        );
+        parties = await getJSON("/api/parties");
+        $("parties").innerHTML = parties
+          .map(
+            (p) =>
+              `<div><label>${p.partyid}</label>
+     <input type="number" class="score" data-party="${p.partyid}" min="0" step="1" required></div>`,
+          )
+          .join("");
+        document
+          .querySelectorAll(".score")
+          .forEach((i) => i.addEventListener("input", updateTotal));
+      })();
+
+      $("lga").onchange = async (e) => {
+        $("ward").disabled = true;
+        $("ward").innerHTML = '<option value="">Select LGA first</option>';
+        if (e.target.value)
+          fill(
+            $("ward"),
+            await getJSON(`/api/wards/${e.target.value}`),
+            "ward_id",
+            "ward_name",
+            "Select ward",
+          );
+      };
+
+      $("f").onsubmit = async (e) => {
+        e.preventDefault();
+        $("msg").innerHTML = "";
+        const scores = {};
+        document
+          .querySelectorAll(".score")
+          .forEach((i) => (scores[i.dataset.party] = i.value));
+        if (
+          !$("lga").value ||
+          !$("ward").value ||
+          !$("name").value.trim() ||
+          !$("by").value.trim()
+        )
+          return show("Please fill in every field.", false);
+        if (
+          Object.values(scores).some(
+            (v) => v === "" || Number(v) < 0 || !Number.isInteger(Number(v)),
+          )
+        )
+          return show(
+            "Enter a whole number (0 or more) for every party.",
+            false,
+          );
+
+        $("btn").disabled = true;
+        $("btn").textContent = "Saving...";
+        try {
+          const r = await fetch("/api/polling-units", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              lga_id: $("lga").value,
+              ward_id: $("ward").value,
+              polling_unit_name: $("name").value,
+              entered_by: $("by").value,
+              scores,
+            }),
+          });
+          const d = await r.json();
+          if (!r.ok) return show(d.error || "Something went wrong.", false);
+          show(
+            `Saved. Polling unit number: <strong>${d.polling_unit_number}</strong>. Add another below.`,
+            true,
+          );
+          $("name").value = "";
+          document.querySelectorAll(".score").forEach((i) => (i.value = ""));
+          updateTotal();
+        } catch {
+          show("Network error. Please try again.", false);
+        } finally {
+          $("btn").disabled = false;
+          $("btn").textContent = "Save results";
+        }
+      };
+    </script>
+  </body>
+</html>

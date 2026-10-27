@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>LGA Summed Results</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {
+        font-family: sans-serif;
+        max-width: 600px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      select {
+        display: block;
+        width: 100%;
+        padding: 0.5rem;
+        margin: 0.5rem 0 1rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      td,
+      th {
+        border: 1px solid #ccc;
+        padding: 0.5rem;
+        text-align: left;
+      }
+      tfoot td {
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <p><a href="/">Question 1: Polling unit results</a></p>
+    <h1>Summed Results by LGA</h1>
+    <label>Local Government</label>
+    <select id="lga">
+      <option value="">Loading...</option>
+    </select>
+    <div id="out"></div>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      fetch("/api/lgas")
+        .then((r) => r.json())
+        .then((d) => {
+          $("lga").innerHTML =
+            '<option value="">Select LGA</option>' +
+            d
+              .map((l) => `<option value="${l.lga_id}">${l.lga_name}</option>`)
+              .join("");
+        });
+      $("lga").onchange = async (e) => {
+        if (!e.target.value) {
+          $("out").innerHTML = "";
+          return;
+        }
+        const { units, totals } = await (
+          await fetch(`/api/lga-total/${e.target.value}`)
+        ).json();
+        if (!units) {
+          $("out").innerHTML =
+            "<p>No polling unit results recorded for this LGA.</p>";
+          return;
+        }
+        const grand = totals.reduce((s, r) => s + Number(r.total), 0);
+        $("out").innerHTML =
+          `<p>Based on ${units} polling unit(s) with results.</p>
+    <table><tr><th>Party</th><th>Total</th></tr>` +
+          totals
+            .map((r) => `<tr><td>${r.party}</td><td>${r.total}</td></tr>`)
+            .join("") +
+          `<tfoot><tr><td>All parties</td><td>${grand}</td></tr></tfoot></table>`;
+      };
+    </script>
+  </body>
+</html>

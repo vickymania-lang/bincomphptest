@@ -1,0 +1,44 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Polling Unit Results</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+ body{font-family:sans-serif;max-width:600px;margin:2rem auto;padding:0 1rem}
+ select{display:block;width:100%;padding:.5rem;margin:.5rem 0 1rem}
+ table{width:100%;border-collapse:collapse} td,th{border:1px solid #ccc;padding:.5rem;text-align:left}
+</style></head><body>
+<h1>Polling Unit Results (Delta State)</h1>
+<label>LGA</label><select id="lga"><option value="">Loading...</option></select>
+<label>Ward</label><select id="ward" disabled><option>Select ward</option></select>
+<label>Polling Unit</label><select id="pu" disabled><option>Select polling unit</option></select>
+<div id="out"></div>
+<script>
+const $ = id => document.getElementById(id);
+const getJSON = async url => (await fetch(url)).json();
+const fill = (sel, items, val, label, ph) => {
+  sel.innerHTML = `<option value="">${ph}</option>` +
+    items.map(i => `<option value="${i[val]}">${i[label] || i[val]}</option>`).join('');
+  sel.disabled = false;
+};
+getJSON('/api/lgas').then(d => fill($('lga'), d, 'lga_id', 'lga_name', 'Select LGA'));
+
+$('lga').onchange = async e => {
+  $('out').innerHTML = ''; $('pu').disabled = true;
+  if (!e.target.value) return;
+  fill($('ward'), await getJSON(`/api/wards/${e.target.value}`), 'ward_id', 'ward_name', 'Select ward');
+};
+$('ward').onchange = async e => {
+  $('out').innerHTML = '';
+  if (!e.target.value) return;
+  fill($('pu'), await getJSON(`/api/pus/${$('lga').value}/${e.target.value}`),
+       'uniqueid', 'polling_unit_name', 'Select polling unit');
+};
+$('pu').onchange = async e => {
+  if (!e.target.value) { $('out').innerHTML = ''; return; }
+  const data = await getJSON(`/api/results/${e.target.value}`);
+  if (data.every(r => r.score === null)) {
+    $('out').innerHTML = '<p>No results recorded for this polling unit.</p>'; return;
+  }
+  $('out').innerHTML = '<table><tr><th>Party</th><th>Score</th></tr>' +
+    data.map(r => `<tr><td>${r.party}</td><td>${r.score ?? '—'}</td></tr>`).join('') + '</table>';
+};
+</script></body></html>
