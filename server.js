@@ -1,32 +1,34 @@
 require("dotenv").config();
+const path = require("path");
 const express = require("express");
-const path = require('path');
-const mysql = require("mysql2/promise");
+const { Pool } = require("pg");
 
 const app = express();
-const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  waitForConnections: true,
-  connectionLimit: 5,
+
+// Initialize PostgreSQL pool using your Neon connection string
+const pool = new Pool({
+  connectionString:
+    process.env.DATABASE_URL ||
+    "postgresql://neondb_owner:npg_rvHkzL0MyJD7@ep-cool-math-b5ganvf8-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
-
+app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());
 
-const STATE_ID = 25; // Delta State
-
+// Fallback root route to serve your index.html
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
+const STATE_ID = 25; // Delta State
+
 app.get("/api/lgas", async (req, res) => {
   try {
-    const [rows] = await pool.query(
-      "SELECT lga_id, lga_name FROM lga WHERE state_id = ? ORDER BY lga_name",
+    const { rows } = await pool.query(
+      "SELECT lga_id, lga_name FROM lga WHERE state_id = $1 ORDER BY lga_name",
       [STATE_ID],
     );
     res.json(rows);
@@ -38,8 +40,8 @@ app.get("/api/lgas", async (req, res) => {
 
 app.get("/api/wards/:lgaId", async (req, res) => {
   try {
-    const [rows] = await pool.query(
-      "SELECT ward_id, ward_name FROM ward WHERE lga_id = ? ORDER BY ward_name",
+    const { rows } = await pool.query(
+      "SELECT ward_id, ward_name FROM ward WHERE lga_id = $1 ORDER BY ward_name",
       [req.params.lgaId],
     );
     res.json(rows);
@@ -51,9 +53,9 @@ app.get("/api/wards/:lgaId", async (req, res) => {
 
 app.get("/api/pus/:lgaId/:wardId", async (req, res) => {
   try {
-    const [rows] = await pool.query(
+    const { rows } = await pool.query(
       `SELECT uniqueid, polling_unit_name, polling_unit_number
-       FROM polling_unit WHERE lga_id = ? AND ward_id = ?
+       FROM polling_unit WHERE lga_id = $1 AND ward_id = $2
        ORDER BY polling_unit_name`,
       [req.params.lgaId, req.params.wardId],
     );
@@ -66,12 +68,11 @@ app.get("/api/pus/:lgaId/:wardId", async (req, res) => {
 
 app.get("/api/results/:puId", async (req, res) => {
   try {
-    // party table drives the rows, so parties with no score still appear
-    const [rows] = await pool.query(
+    const { rows } = await pool.query(
       `SELECT p.partyid AS party, r.party_score AS score
        FROM party p
        LEFT JOIN announced_pu_results r
-         ON r.party_abbreviation = p.partyid AND r.polling_unit_uniqueid = ?
+         ON r.party_abbreviation = p.partyid AND r.polling_unit_uniqueid = $1
        ORDER BY p.id`,
       [String(req.params.puId)],
     );
@@ -84,27 +85,30 @@ app.get("/api/results/:puId", async (req, res) => {
 
 app.get("/api/lga-total/:lgaId", async (req, res) => {
   try {
-    const [totals] = await pool.query(
+    const { rows: totals } = await pool.query(
       `SELECT p.partyid AS party, COALESCE(SUM(x.party_score), 0) AS total
        FROM party p
        LEFT JOIN (
          SELECT r.party_abbreviation, r.party_score
          FROM announced_pu_results r
          JOIN polling_unit pu ON pu.uniqueid = r.polling_unit_uniqueid
-         WHERE pu.lga_id = ?
+         WHERE pu.lga_id = $1
        ) x ON x.party_abbreviation = p.partyid
        GROUP BY p.id, p.partyid
        ORDER BY p.id`,
       [req.params.lgaId],
     );
-    const [[meta]] = await pool.query(
+
+    const metaResult = await pool.query(
       `SELECT COUNT(DISTINCT r.polling_unit_uniqueid) AS units
        FROM announced_pu_results r
        JOIN polling_unit pu ON pu.uniqueid = r.polling_unit_uniqueid
-       WHERE pu.lga_id = ?`,
+       WHERE pu.lga_id = $1`,
       [req.params.lgaId],
     );
-    res.json({ units: meta.units, totals });
+    const units = parseInt(metaResult.rows[0]?.units || 0, 10);
+
+    res.json({ units, totals });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Server error" });
@@ -113,7 +117,7 @@ app.get("/api/lga-total/:lgaId", async (req, res) => {
 
 app.get("/api/parties", async (req, res) => {
   try {
-    const [rows] = await pool.query("SELECT partyid FROM party ORDER BY id");
+    const { rows } = await pool.query("SELECT partyid FROM party ORDER BY id");
     res.json(rows);
   } catch (e) {
     console.error(e);
@@ -137,20 +141,23 @@ app.post("/api/polling-units", async (req, res) => {
   )
     return res.status(400).json({ error: "Please fill in every field." });
 
-  const conn = await pool.getConnection();
+  const client = await pool.connect();
   try {
-    // validate LGA (Delta State) and that the ward belongs to it
-    const [[ward]] = await conn.query(
+    // Validate LGA and Ward
+    const wardRes = await client.query(
       `SELECT w.uniqueid FROM ward w JOIN lga l ON l.lga_id = w.lga_id
-       WHERE w.ward_id = ? AND w.lga_id = ? AND l.state_id = ?`,
+       WHERE w.ward_id = $1 AND w.lga_id = $2 AND l.state_id = $3`,
       [ward_id, lga_id, STATE_ID],
     );
+    const ward = wardRes.rows[0];
     if (!ward) return res.status(400).json({ error: "Invalid LGA or ward." });
 
-    // every party must have a whole-number score >= 0
-    const [parties] = await conn.query("SELECT partyid FROM party ORDER BY id");
+    // Validate scores
+    const partiesRes = await client.query(
+      "SELECT partyid FROM party ORDER BY id",
+    );
     const resultRows = [];
-    for (const { partyid } of parties) {
+    for (const { partyid } of partiesRes.rows) {
       const v = scores[partyid];
       if (v === "" || v === null || v === undefined || !/^\d+$/.test(String(v)))
         return res
@@ -159,12 +166,15 @@ app.post("/api/polling-units", async (req, res) => {
       resultRows.push([partyid, parseInt(v, 10)]);
     }
 
-    await conn.beginTransaction();
-    const [[{ n }]] = await conn.query(
+    await client.query("BEGIN");
+
+    const maxRes = await client.query(
       `SELECT COALESCE(MAX(polling_unit_id), 0) + 1 AS n
-       FROM polling_unit WHERE lga_id = ? AND ward_id = ? FOR UPDATE`,
+       FROM polling_unit WHERE lga_id = $1 AND ward_id = $2 FOR UPDATE`,
       [lga_id, ward_id],
     );
+    const n = maxRes.rows[0].n;
+
     const number =
       "DT" +
       String(lga_id).padStart(2, "0") +
@@ -172,39 +182,34 @@ app.post("/api/polling-units", async (req, res) => {
       String(n).padStart(3, "0");
     const ip = String(req.ip || "").slice(0, 50);
 
-    const [ins] = await conn.query(
+    // Insert polling unit and retrieve the generated uniqueid (Postgres uses RETURNING)
+    const insRes = await client.query(
       `INSERT INTO polling_unit
-        (polling_unit_id, ward_id, lga_id, uniquewardid, polling_unit_number,
-         polling_unit_name, entered_by_user, date_entered, user_ip_address)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), ?)`,
+       (polling_unit_id, ward_id, lga_id, uniquewardid, polling_unit_number,
+        polling_unit_name, entered_by_user, date_entered, user_ip_address)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8) RETURNING uniqueid`,
       [n, ward_id, lga_id, ward.uniqueid, number, name, by, ip],
     );
-    const puId = ins.insertId;
+    const puId = insRes.rows[0].uniqueid;
 
-    await conn.query(
-      `INSERT INTO announced_pu_results
-        (polling_unit_uniqueid, party_abbreviation, party_score,
-         entered_by_user, date_entered, user_ip_address) VALUES ?`,
-      [
-        resultRows.map(([party, score]) => [
-          String(puId),
-          party,
-          score,
-          by,
-          new Date(),
-          ip,
-        ]),
-      ],
-    );
+    // Insert results loops for Postgres
+    for (const [party, score] of resultRows) {
+      await client.query(
+        `INSERT INTO announced_pu_results
+         (polling_unit_uniqueid, party_abbreviation, party_score,
+          entered_by_user, date_entered, user_ip_address) VALUES ($1, $2, $3, $4, NOW(), $5)`,
+        [String(puId), party, score, by, ip],
+      );
+    }
 
-    await conn.commit();
+    await client.query("COMMIT");
     res.status(201).json({ uniqueid: puId, polling_unit_number: number });
   } catch (e) {
-    await conn.rollback().catch(() => {});
+    await client.query("ROLLBACK").catch(() => {});
     console.error(e);
     res.status(500).json({ error: "Could not save. Please try again." });
   } finally {
-    conn.release();
+    client.release();
   }
 });
 
